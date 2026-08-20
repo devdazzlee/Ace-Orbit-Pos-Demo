@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(yarn prisma:generate)",
+      "Bash(cd /c/Users/Lenovo/Documents/Manpasand-Pos-/Backend && grep -n \"references: \\\\[id\\\\]\" src/prisma/schema.prisma | head -5 >/dev/null; echo \"searching relations to Customer:\"; grep -nE \"fields: \\\\[customer_id\\\\]|customer_id .*Customer|model \" src/prisma/schema.prisma | grep -iE \"model |customer\" | head -80)",
+      "Read(//c/c/Users/Lenovo/Documents/Manpasand-Pos-/Backend/src/prisma/**)",
+      "Bash(npx tsc *)",
+      "Bash(cd /c/Users/Lenovo/Documents/Manpasand-Pos-/Backend && grep -rn \"new PrismaClient\" src --include=*.ts | head; echo \"---\"; grep -rn \"export\" src/client/* 2>/dev/null | head; echo \"--- find prisma export ---\"; grep -rln \"PrismaClient\" src --include=*.ts | head)",
+      "Read(//c/c/Users/Lenovo/Documents/Manpasand-Pos-/Backend/**)",
+      "Bash(./node_modules/.bin/ts-node src/_check-cust.ts)",
+      "Bash(cd /c/Users/Lenovo/Documents/Manpasand-Pos-/Frontend && grep -n \"DialogFooter\\\\|DialogHeader\" components/customer-ledger.tsx | head -3; echo \"---tsc---\"; npx tsc --noEmit 2>&1 | grep -iE \"customer-ledger\"; echo \"---done---\")",
+      "Read(//c/c/Users/Lenovo/Documents/Manpasand-Pos-/Frontend/components/**)",
+      "Bash(awk -F: '{print $1\": \"$0}')",
+      "Bash(npx ts-node *)"
+    ]
+  }
+}

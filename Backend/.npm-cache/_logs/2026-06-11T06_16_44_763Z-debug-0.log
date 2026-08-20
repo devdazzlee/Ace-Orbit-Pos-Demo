@@ -1,0 +1,18 @@
+0 verbose cli C:\nvm4w\nodejs\node.exe C:\nvm4w\nodejs\node_modules\npm\bin\npm-cli.js
+1 info using npm@10.8.2
+2 info using node@v18.20.8
+3 silly config load:file:C:\Users\raza.ahmed\AppData\Local\nvm\v18.20.8\node_modules\npm\npmrc
+4 silly config load:file:d:\New folder\Sarwat-Traders-POS\Backend\.npmrc
+5 silly config load:file:C:\Users\raza.ahmed\.npmrc
+6 silly config load:file:C:\nvm4w\nodejs\etc\npmrc
+7 verbose title npm run audit:supplier-ledger
+8 verbose argv "--cache" "d:/New folder/Sarwat-Traders-POS/Backend/.npm-cache" "run" "audit:supplier-ledger"
+9 verbose logfile logs-max:10 dir:d:\New folder\Sarwat-Traders-POS\Backend\.npm-cache\_logs\2026-06-11T06_16_44_763Z-
+10 verbose logfile d:\New folder\Sarwat-Traders-POS\Backend\.npm-cache\_logs\2026-06-11T06_16_44_763Z-debug-0.log
+11 silly logfile done cleaning log files
+12 verbose cwd d:\New folder\Sarwat-Traders-POS\Backend
+13 verbose os Windows_NT 10.0.26200
+14 verbose node v18.20.8
+15 verbose npm  v10.8.2
+16 verbose exit 0
+17 info ok
