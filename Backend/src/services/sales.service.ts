@@ -5,6 +5,11 @@ import { getReportingPeriodCreatedAtFilter } from '../utils/reportingPeriod';
 import { ledgerBalanceEngine } from './ledger-balance.engine';
 import { saleUpfrontPaymentDescription } from '../utils/sale-ledger-revision';
 import { buildSaleLedgerSnapshot } from '../utils/sale-ledger-derivation';
+import {
+  allocateInvoiceDiscount,
+  roundMoney,
+  type AllocatedLinePricing,
+} from '../utils/sale-pricing';
 
 const round2 = (n: number) => Number(n.toFixed(2));
 
@@ -75,6 +80,79 @@ class SaleService {
       }
     }
     return map;
+  }
+
+  /**
+   * The lines a return can be priced against: the ORIGINAL lines of the sale
+   * (older rows predate `item_type`, so an untyped line still counts as original).
+   */
+  private getOriginalLines<T extends { item_type?: SaleItemType | null }>(saleItems: T[]): T[] {
+    const original = saleItems.filter(
+      (item) => !item.item_type || item.item_type === SaleItemType.ORIGINAL,
+    );
+    return original.length > 0 ? original : saleItems;
+  }
+
+  /**
+   * Net (discount-adjusted) price of each original line, keyed by sale_item id.
+   *
+   * `unit_price` is the gross catalogue price; the invoice discount lives on the
+   * sale header. Anything that quotes or posts a refund must use the net price
+   * from here, otherwise it gives back money the customer never paid.
+   */
+  private getNetPricingByLineId(sale: {
+    discount_amount: Prisma.Decimal;
+    sale_items: Array<{
+      id: string;
+      quantity: Prisma.Decimal;
+      unit_price: Prisma.Decimal;
+      line_total: Prisma.Decimal;
+      item_type?: SaleItemType | null;
+    }>;
+  }): Map<string, AllocatedLinePricing> {
+    return allocateInvoiceDiscount(this.getOriginalLines(sale.sale_items), sale.discount_amount);
+  }
+
+  /** Exposes the net price of a line to API consumers alongside the gross fields. */
+  private withNetPricing<
+    T extends { id: string; quantity: Prisma.Decimal; unit_price: Prisma.Decimal },
+  >(item: T, pricing: Map<string, AllocatedLinePricing>) {
+    const allocated = pricing.get(item.id);
+    if (!allocated) {
+      // Not an original line (a RETURN/EXCHANGE line already stores net values).
+      return {
+        ...item,
+        allocated_discount: new Prisma.Decimal(0),
+        net_unit_price: item.unit_price,
+        net_line_total: roundMoney(item.unit_price.mul(item.quantity)),
+      };
+    }
+    return {
+      ...item,
+      allocated_discount: roundMoney(allocated.discountShare),
+      net_unit_price: allocated.netUnitPrice,
+      net_line_total: roundMoney(allocated.netLineTotal),
+    };
+  }
+
+  /** Attaches net (discount-adjusted) pricing to every line of a sale payload. */
+  private withNetPricedItems<
+    T extends {
+      discount_amount: Prisma.Decimal;
+      sale_items: Array<{
+        id: string;
+        quantity: Prisma.Decimal;
+        unit_price: Prisma.Decimal;
+        line_total: Prisma.Decimal;
+        item_type?: SaleItemType | null;
+      }>;
+    },
+  >(sale: T) {
+    const netPricing = this.getNetPricingByLineId(sale);
+    return {
+      ...sale,
+      sale_items: sale.sale_items.map((item) => this.withNetPricing(item, netPricing)),
+    };
   }
 
   /** For return/exchange rows with no customer, show the original sale's customer in lists. */
@@ -250,9 +328,9 @@ class SaleService {
         include,
         orderBy: { sale_date: 'desc' },
       });
-      const hydrated = await this.hydrateCreditSaleInvoiceTotals(
-        await this.hydrateReturnSaleCustomers(data),
-      );
+      const hydrated = (
+        await this.hydrateCreditSaleInvoiceTotals(await this.hydrateReturnSaleCustomers(data))
+      ).map((sale) => this.withNetPricedItems(sale));
       return {
         data: hydrated,
         meta: {
@@ -279,9 +357,9 @@ class SaleService {
       }),
     ]);
 
-    const hydrated = await this.hydrateCreditSaleInvoiceTotals(
-      await this.hydrateReturnSaleCustomers(data),
-    );
+    const hydrated = (
+      await this.hydrateCreditSaleInvoiceTotals(await this.hydrateReturnSaleCustomers(data))
+    ).map((sale) => this.withNetPricedItems(sale));
     return {
       data: hydrated,
       meta: {
@@ -408,7 +486,7 @@ class SaleService {
     return sales.map((s) => {
       const f = flags.get(s.id) ?? { fully_returned: false, has_prior_returns: false };
       return {
-        ...s,
+        ...this.withNetPricedItems(s),
         return_eligibility: {
           fully_returned: f.fully_returned,
           has_prior_returns: f.has_prior_returns,
@@ -456,16 +534,14 @@ class SaleService {
     }
 
     const returnedMap = await this.getReturnedQtyByOriginalSaleLineIds(sale.id);
-    const originalLines = sale.sale_items.filter(
-      (item) => !item.item_type || item.item_type === SaleItemType.ORIGINAL,
-    );
-    const linesForEditor = originalLines.length > 0 ? originalLines : sale.sale_items;
+    const netPricing = this.getNetPricingByLineId(sale);
+    const linesForEditor = this.getOriginalLines(sale.sale_items);
 
     const saleItems = linesForEditor.map((item) => {
       const already = returnedMap.get(item.id)?.toNumber() ?? 0;
       const origQty = item.quantity.toNumber();
       return {
-        ...item,
+        ...this.withNetPricing(item, netPricing),
         quantity_already_returned: already,
         quantity_returnable: Math.max(0, origQty - already),
       };
@@ -1176,9 +1252,13 @@ class SaleService {
     }
 
     const returnedQtyByLineId = await this.getReturnedQtyByOriginalSaleLineIds(originalSaleId);
+    // Returns are always priced against the sale's own lines, discount included.
+    const originalLines = this.getOriginalLines(originalSale.sale_items);
+    const netPricingByLineId = this.getNetPricingByLineId(originalSale);
+    const originalLineByProductId = new Map(originalLines.map((line) => [line.product_id, line]));
 
     for (const ret of returnedItems) {
-      const originalItem = originalSale.sale_items.find((item) => item.product_id === ret.productId);
+      const originalItem = originalLineByProductId.get(ret.productId);
       if (!originalItem) {
         throw new AppError(400, `Product ${ret.productId} not found in original sale`);
       }
@@ -1249,13 +1329,18 @@ class SaleService {
     };
 
     for (const ret of returnedItems) {
-      const originalItem = originalSale.sale_items.find((item) => item.product_id === ret.productId);
-      if (!originalItem) {
+      const originalItem = originalLineByProductId.get(ret.productId);
+      const linePricing = originalItem ? netPricingByLineId.get(originalItem.id) : undefined;
+      if (!originalItem || !linePricing) {
         throw new AppError(400, `Product ${ret.productId} not in original sale`);
       }
 
       const returnQuantity = new Prisma.Decimal(ret.quantity);
-      const lineTotal = new Prisma.Decimal(originalItem.unit_price).mul(returnQuantity).mul(-1);
+      // Refund what the customer actually paid: the gross unit price minus this
+      // line's share of the invoice discount. Pricing the refund off unit_price
+      // would hand back a discount the store never collected.
+      const refundUnitPrice = linePricing.netUnitPrice;
+      const lineTotal = roundMoney(refundUnitPrice.mul(returnQuantity)).mul(-1);
       total = total.plus(lineTotal);
 
       const disposition = ret.disposition ?? 'RESTOCK';
@@ -1276,7 +1361,11 @@ class SaleService {
       saleItems.push({
         product_id: ret.productId,
         quantity: returnQuantity.mul(-1),
-        unit_price: originalItem.unit_price,
+        // The rate actually refunded — net of the invoice discount — kept at full
+        // precision so quantity x unit_price reconciles with line_total instead of
+        // drifting a cent per unit. The gross price it came from stays reachable
+        // through ref_sale_item_id.
+        unit_price: refundUnitPrice,
         tax_rate: originalItem.tax_rate,
         discount_rate: originalItem.discount_rate,
         tax_amount: new Prisma.Decimal(0),

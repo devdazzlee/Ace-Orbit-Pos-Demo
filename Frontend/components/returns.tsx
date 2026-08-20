@@ -89,7 +89,13 @@ interface Sale {
     /** Units still allowed to return (original minus prior returns) — from GET /sale/:id */
     quantity_returnable?: number
     quantity_already_returned?: number
+    /** Gross catalogue price — NOT what the customer paid when the sale had a discount. */
     unit_price: number
+    /**
+     * Price actually paid per unit: unit_price minus this line's share of the
+     * invoice discount, computed by the API. Refund values must use this.
+     */
+    net_unit_price?: number
     line_total: number
   }>
 }
@@ -177,6 +183,7 @@ interface SelectedReturnItem {
   soldQuantity: number
   alreadyReturned?: number
   returnQuantity: number
+  /** Price per unit actually paid (invoice discount already applied) — the refund rate. */
   unitPrice: number
   /** Whether this product is included in the return (unchecked = excluded) */
   included: boolean
@@ -269,6 +276,9 @@ const normalizeSaleRecord = (sale: any): Sale => ({
           quantity_returnable: returnable,
           quantity_already_returned: alreadyReturned,
           unit_price: Number(item?.unit_price || 0),
+          // Every sale endpoint returns net_unit_price; the coalesce only covers
+          // payloads cached offline before this field existed.
+          net_unit_price: Number(item?.net_unit_price ?? item?.unit_price ?? 0),
           line_total: Number(item?.line_total || 0),
         }
       })
@@ -280,6 +290,9 @@ const normalizeSaleRecord = (sale: any): Sale => ({
       }
     : undefined,
 })
+
+/** Money rounding, so discounted per-unit prices never surface float noise. */
+const round2 = (value: number) => Math.round((value + Number.EPSILON) * 100) / 100
 
 const matchesSaleSearch = (sale: any, term: string) => {
   if (!term) return true
@@ -604,19 +617,21 @@ export function Returns({ module = "returns" }: { module?: ReturnsModule }) {
 
   const returnSubtotal = useMemo(
     () =>
-      selectedReturnItems
-        .filter((i) => i.included && i.returnQuantity > 0)
-        .reduce((sum, i) => sum + i.returnQuantity * i.unitPrice, 0),
+      round2(
+        selectedReturnItems
+          .filter((i) => i.included && i.returnQuantity > 0)
+          .reduce((sum, i) => sum + round2(i.returnQuantity * i.unitPrice), 0)
+      ),
     [selectedReturnItems]
   )
 
   const exchangeSubtotal = useMemo(
-    () => exchangeItems.reduce((sum, i) => sum + i.quantity * i.price, 0),
+    () => round2(exchangeItems.reduce((sum, i) => sum + round2(i.quantity * i.price), 0)),
     [exchangeItems]
   )
 
   const balanceSummary = useMemo(() => {
-    const diff = exchangeSubtotal - returnSubtotal
+    const diff = round2(exchangeSubtotal - returnSubtotal)
     return {
       returnSubtotal,
       exchangeSubtotal,
@@ -993,8 +1008,8 @@ export function Returns({ module = "returns" }: { module?: ReturnsModule }) {
         qty: Number(ei.quantity) || 0,
         price: Number(ei.price) || 0,
       }))
-      const refundTotal = retItems.reduce((s, i) => s + i.qty * i.price, 0)
-      const exchangeTotal = exchItems.reduce((s, i) => s + i.qty * i.price, 0)
+      const refundTotal = round2(retItems.reduce((s, i) => s + round2(i.qty * i.price), 0))
+      const exchangeTotal = round2(exchItems.reduce((s, i) => s + round2(i.qty * i.price), 0))
 
       setReturnSuccessData({
         saleNumber: response.data?.data?.sale_number || `SALE-${Date.now()}`,
@@ -1008,7 +1023,7 @@ export function Returns({ module = "returns" }: { module?: ReturnsModule }) {
         exchangedItems: exchItems,
         refundTotal,
         exchangeTotal,
-        netAmount: exchangeTotal - refundTotal,
+        netAmount: round2(exchangeTotal - refundTotal),
         previousBalance: Number(selectedSale?.customer?.outstanding_balance || 0),
       })
 
@@ -1113,7 +1128,8 @@ export function Returns({ module = "returns" }: { module?: ReturnsModule }) {
           soldQuantity: sold,
           alreadyReturned: item.quantity_already_returned,
           returnQuantity: maxReturnable,
-          unitPrice: item.unit_price,
+          // Refund price = what the customer paid, i.e. after the invoice discount.
+          unitPrice: item.net_unit_price ?? item.unit_price,
           included: true,
           disposition: "RESTOCK" as InventoryDisposition,
         }
@@ -1148,7 +1164,8 @@ export function Returns({ module = "returns" }: { module?: ReturnsModule }) {
             soldQuantity: sold,
             alreadyReturned: item.quantity_already_returned,
             returnQuantity: maxReturnable,
-            unitPrice: item.unit_price,
+            // Refund price = what the customer paid, i.e. after the invoice discount.
+            unitPrice: item.net_unit_price ?? item.unit_price,
             included: true,
             disposition: "RESTOCK" as InventoryDisposition,
           }
@@ -1517,7 +1534,7 @@ export function Returns({ module = "returns" }: { module?: ReturnsModule }) {
             setIsProcessOpen(open)
           }}
         >
-          <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
+          <DialogContent className="w-[95vw] max-w-4xl max-h-[90vh] overflow-y-auto">
             <DialogHeader>
               <DialogTitle>
                 {processMode === "exchanges" ? "Process Exchange" : "Process Return"}
@@ -1784,7 +1801,7 @@ export function Returns({ module = "returns" }: { module?: ReturnsModule }) {
                     </div>
                   </div>
                   <div className="border rounded-lg overflow-hidden">
-                    <Table>
+                    <Table className="min-w-[640px]">
                       <TableHeader>
                         <TableRow>
                           <TableHead className="w-10" />
@@ -1997,10 +2014,7 @@ export function Returns({ module = "returns" }: { module?: ReturnsModule }) {
                           <strong>Items to Return:</strong> {selectedReturnItems.filter(item => item.included && item.returnQuantity > 0).length}
                         </div>
                         <div>
-                          <strong>Total Return Value:</strong> Rs {selectedReturnItems
-                            .filter(item => item.included)
-                            .reduce((total, item) => total + (item.returnQuantity * item.unitPrice), 0)
-                            .toLocaleString()}
+                          <strong>Total Return Value:</strong> Rs {returnSubtotal.toLocaleString()}
                         </div>
                       </div>
                     </div>
@@ -2366,7 +2380,7 @@ export function Returns({ module = "returns" }: { module?: ReturnsModule }) {
 
       {/* View Return Details Dialog */}
       <Dialog open={isViewOpen} onOpenChange={setIsViewOpen}>
-        <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
+        <DialogContent className="w-[95vw] max-w-4xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="text-2xl font-bold">
               {selectedReturn?.status === "EXCHANGED" ? "Exchange" : "Return"} Details —{" "}
